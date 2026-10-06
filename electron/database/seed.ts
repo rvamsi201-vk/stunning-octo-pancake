@@ -37,7 +37,7 @@ export function seedDatabase(db: LocalDatabase) {
   const insertAssessment = db.prepare('INSERT OR IGNORE INTO assessments VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 100, ?, ?, NULL, ?, ?)');
   const insertItem = db.prepare('INSERT OR IGNORE INTO items VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
   const insertExternal = db.prepare('INSERT OR IGNORE INTO external_records (id,provider,provider_account_id,provider_record_id,type,title,sender,occurred_at,detected_due_at,source_url,classification_state,raw_metadata,area,archived,created_at,updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
-  const insertPortal = db.prepare('INSERT OR IGNORE INTO portals VALUES (?, ?, ?, ?, 1, ?, ?)');
+  const insertPortal = db.prepare('INSERT OR IGNORE INTO portals (id,name,url,area,sort_order,enabled,archived,created_at,updated_at) VALUES (?,?,?,?,?,1,0,?,?)');
   const insertInstitutionDomain = db.prepare('INSERT OR IGNORE INTO institution_mail_domains (id,institution_id,domain,created_at) VALUES (?,?,?,?)');
   const grading = JSON.stringify({ kind: 'max-of-two', formulas: ['0.6*F + 0.3*max(Q1,Q2)', '0.45*F + 0.25*Q1 + 0.3*Q2'], bonusSeparate: true });
 
@@ -66,7 +66,15 @@ export function seedDatabase(db: LocalDatabase) {
     insertItem.run('72000000-0000-4000-8000-000000000002', 'Prepare Exora status notes', '', 'EXORA', null, 'task', 'todo', 'high', '2026-09-28T11:00:00.000+05:30', 'seed', null, null, null, now, now);
     insertExternal.run('81000000-0000-4000-8000-000000000001', 'mock-google', 'iitm-account', 'mail-001', 'mail', 'MA1003 Extra Activity announcement', 'course-team@study.iitm.ac.in', '2026-09-26T09:15:00.000+05:30', '2026-10-31T23:59:00.000+05:30', null, 'needs_review', null, 'IITM', 0, now, now);
     insertExternal.run('81000000-0000-4000-8000-000000000002', 'mock-microsoft', 'manipal-account', 'mail-002', 'mail', 'Live session resources available', 'faculty@manipal.edu', '2026-09-26T12:30:00.000+05:30', null, null, 'needs_review', null, 'MANIPAL', 0, now, now);
-    [['IITM Portal','IITM'],['IITM Gmail','IITM'],['Manipal LMS','MANIPAL'],['Manipal Outlook','MANIPAL'],['Manipal Teams','MANIPAL'],['ChatGPT','PERSONAL'],['Exora Tools','EXORA']].forEach(([name, area], i) => insertPortal.run(`91000000-0000-4000-8000-${String(i + 1).padStart(12, '0')}`, name, null, area, now, now));
+    [
+      ['IITM Portal', 'https://ds.study.iitm.ac.in/', 'IITM'],
+      ['IITM Gmail', 'https://mail.google.com/', 'IITM'],
+      ['Manipal LMS', 'https://lms.manipal.edu/', 'MANIPAL'],
+      ['Manipal Outlook', 'https://outlook.office.com/', 'MANIPAL'],
+      ['Manipal Teams', 'https://teams.microsoft.com/', 'MANIPAL'],
+      ['ChatGPT', 'https://chatgpt.com/', 'PERSONAL'],
+      ['Google Calendar', 'https://calendar.google.com/', 'PERSONAL'],
+    ].forEach(([name, url, area], i) => insertPortal.run(`91000000-0000-4000-8000-${String(i + 1).padStart(12, '0')}`, name, url, area, i + 1, now, now));
     db.prepare("INSERT OR IGNORE INTO app_settings VALUES ('dailyCapacity', 'normal', ?)").run(now);
     db.prepare("INSERT OR IGNORE INTO app_settings VALUES ('appearance', 'system', ?)").run(now);
   })();

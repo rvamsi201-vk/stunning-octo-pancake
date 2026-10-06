@@ -3,7 +3,7 @@ import { IPC, type CommandCentreApi, type Area, type ItemInput, type ItemStatus 
 
 const invoke = <T>(channel: string, payload?: unknown) => ipcRenderer.invoke(channel, payload) as Promise<T>;
 const api: CommandCentreApi = {
-  getDashboard: () => invoke(IPC.dashboard), getToday: () => invoke(IPC.today), getUpcoming: (days) => invoke(IPC.upcoming,{days}), getOverdue: () => invoke(IPC.overdue),
+  getDashboard: () => invoke(IPC.dashboard), getToday: () => invoke(IPC.today), getTodayView: (area) => invoke(IPC.todayView,{area}), getUpcoming: (days) => invoke(IPC.upcoming,{days}), getUpcomingView: (days,area) => invoke(IPC.upcomingView,{days,area}), getCalendarMonth: (input) => invoke(IPC.calendarMonth,input), getOverdue: () => invoke(IPC.overdue),
   getItems: (filters?:{area?:Area;status?:ItemStatus}) => invoke(IPC.items,filters), createItem: (input:ItemInput) => invoke(IPC.itemCreate,input), updateItem: (input) => invoke(IPC.itemUpdate,input), completeItem: (id) => invoke(IPC.itemComplete,{id}),
   getCourses: (institution?:string, options?:{includeHistorical?:boolean}) => invoke(IPC.courses,{institution,...options}),
   getCourse: (id:string) => invoke(IPC.courseGet,{id}),
@@ -33,6 +33,8 @@ const api: CommandCentreApi = {
   getInbox: (filters) => invoke(IPC.inbox,filters), actOnExternalRecord: (input) => invoke(IPC.inboxAction,input), search: (query,area) => invoke(IPC.search,{query,area}),
   actOnProposal:(input)=>invoke(IPC.proposalAction,input),getIntegrationAccounts:()=>invoke(IPC.integrations),connectGoogle:(input)=>invoke(IPC.googleConnect,input),syncIntegration:(id)=>invoke(IPC.integrationSync,{id}),reconnectIntegration:(id)=>invoke(IPC.integrationReconnect,{id}),disconnectIntegration:(id)=>invoke(IPC.integrationDisconnect,{id}),openOriginal:(url)=>invoke(IPC.openOriginal,{url}),
   getMailRoutingRules:(accountId)=>invoke(IPC.mailRules,{id:accountId}),addMailRoutingRule:(input)=>invoke(IPC.mailRuleAdd,input),deleteMailRoutingRule:(id)=>invoke(IPC.mailRuleDelete,{id}),reevaluateInbox:(accountId)=>invoke(IPC.inboxReevaluate,{id:accountId}),
-  getSetting: (key) => invoke(IPC.settingGet,{key}), setSetting: (key,value) => invoke(IPC.settingSet,{key,value}), exportBackup: () => invoke(IPC.backup),
+  getSetting: (key) => invoke(IPC.settingGet,{key}), setSetting: (key,value) => invoke(IPC.settingSet,{key,value}), exportBackup: () => invoke(IPC.backup), exportDataJson: () => invoke(IPC.exportJson),
+  listPortals: (includeArchived) => invoke(IPC.portals,{includeArchived}), createPortal: (input) => invoke(IPC.portalCreate,input), updatePortal: (input) => invoke(IPC.portalUpdate,input), archivePortal: (id) => invoke(IPC.portalArchive,{id}), reorderPortals: (input) => invoke(IPC.portalReorder,input),
+  openPortal: (id) => invoke(IPC.portalOpen,{id}), setPortalBounds: (bounds) => invoke(IPC.portalBounds,bounds), hidePortal: () => invoke(IPC.portalHide), portalBack: () => invoke(IPC.portalBack), portalForward: () => invoke(IPC.portalForward), portalReload: () => invoke(IPC.portalReload), portalOpenExternal: () => invoke(IPC.portalOpenExternal), getPortalState: () => invoke(IPC.portalState),
 };
 contextBridge.exposeInMainWorld('commandCentre',api);

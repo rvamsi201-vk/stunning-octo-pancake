@@ -1,6 +1,6 @@
 {
   "name": "command-centre",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "private": true,
   "description": "A local-first personal productivity command centre for macOS.",
   "main": "dist-electron/electron/main/main.js",

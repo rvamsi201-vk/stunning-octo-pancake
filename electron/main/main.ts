@@ -1,7 +1,8 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type MenuItemConstructorOptions } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, shell, type MenuItemConstructorOptions } from 'electron';
 import path from 'node:path';
+import { writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { IPC, AccountIdSchema, AssessmentAdminInputSchema, AssessmentAdminUpdateSchema, AssessmentScoreSchema, ConnectGoogleSchema, CourseAdminInputSchema, CourseAdminUpdateSchema, ExternalActionSchema, IdSchema, InboxFilterSchema, InstitutionInputSchema, InstitutionUpdateSchema, ItemInputSchema, ItemPatchSchema, MailRoutingRuleInputSchema, ModuleAdminInputSchema, ModuleAdminUpdateSchema, ModuleReorderSchema, ModuleStateSchema, OpenOriginalSchema, ProposalActionSchema, RangeSchema, SearchSchema, SettingSchema, TermInputSchema, TermStatusSchema, TermUpdateSchema } from '../../shared/contracts.js';
+import { IPC, AccountIdSchema, AssessmentAdminInputSchema, AssessmentAdminUpdateSchema, AssessmentScoreSchema, CalendarMonthSchema, ConnectGoogleSchema, CourseAdminInputSchema, CourseAdminUpdateSchema, ExternalActionSchema, IdSchema, InboxFilterSchema, InstitutionInputSchema, InstitutionUpdateSchema, ItemInputSchema, ItemPatchSchema, MailRoutingRuleInputSchema, ModuleAdminInputSchema, ModuleAdminUpdateSchema, ModuleReorderSchema, ModuleStateSchema, OpenOriginalSchema, PortalBoundsSchema, PortalInputSchema, PortalOpenSchema, PortalReorderSchema, PortalUpdateSchema, ProposalActionSchema, RangeSchema, SearchSchema, SettingSchema, TermInputSchema, TermStatusSchema, TermUpdateSchema, TodayFilterSchema, UpcomingViewSchema } from '../../shared/contracts.js';
 import { runMigrations } from '../database/migrations.js';
 import { seedDatabase } from '../database/seed.js';
 import { LocalDatabase } from '../database/client.js';
@@ -14,6 +15,11 @@ import { GoogleProvider } from '../integrations/google/google-provider.js';
 import { DeterministicClassifier } from '../classification/classifier.js';
 import { configureAppUserData } from './app-paths.js';
 import { loadMainEnvironment } from './load-env.js';
+import { DataExportService } from '../services/data-export-service.js';
+import { PortalService } from '../services/portal-service.js';
+import { SecurePortalHost } from '../portals/secure-portal-host.js';
+import { parseNotificationPreferences, remindersDueNow, type ReminderCandidate } from '../services/notification-scheduler.js';
+import { ReminderDeliveryService, reminderOccurrenceKey } from '../services/reminder-delivery-service.js';
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 configureAppUserData();
@@ -27,6 +33,11 @@ let database: LocalDatabase;
 let service: CommandCentreService;
 let academicAdmin: AcademicAdminService;
 let integrations: IntegrationService;
+let portals: PortalService;
+let dataExport: DataExportService;
+let portalHost: SecurePortalHost;
+let reminderDeliveries: ReminderDeliveryService;
+let mainWindow: BrowserWindow | null = null;
 
 function assertTrusted(event: Electron.IpcMainInvokeEvent) {
   const url = event.senderFrame?.url ?? '';
@@ -35,8 +46,13 @@ function assertTrusted(event: Electron.IpcMainInvokeEvent) {
 function handle(channel: string, fn: (payload: any) => unknown) { ipcMain.handle(channel, (event, payload) => { assertTrusted(event); return fn(payload); }); }
 
 function registerIpc() {
-  handle(IPC.dashboard, () => service.getDashboard()); handle(IPC.today, () => service.getToday());
-  handle(IPC.upcoming, (p) => service.getUpcoming(RangeSchema.parse(p).days)); handle(IPC.overdue, () => service.getOverdue());
+  handle(IPC.dashboard, () => service.getDashboard());
+  handle(IPC.today, () => service.getToday());
+  handle(IPC.todayView, (p) => service.getTodayView(TodayFilterSchema.parse(p ?? {}).area));
+  handle(IPC.upcoming, (p) => service.getUpcoming(RangeSchema.parse(p).days));
+  handle(IPC.upcomingView, (p) => { const value = UpcomingViewSchema.parse(p); return service.getUpcomingView(value.days, value.area); });
+  handle(IPC.calendarMonth, (p) => { const value = CalendarMonthSchema.parse(p); return service.getCalendarMonth(value.year, value.month, value.selectedDate, value.area); });
+  handle(IPC.overdue, () => service.getOverdue());
   handle(IPC.items, (p={}) => service.getItems(p)); handle(IPC.itemCreate, (p) => service.createItem(ItemInputSchema.parse(p))); handle(IPC.itemUpdate, (p) => service.updateItem(ItemPatchSchema.parse(p))); handle(IPC.itemComplete, (p) => service.completeItem(IdSchema.parse(p).id));
   handle(IPC.courses, (p) => service.getCourses(p?.institution, { includeHistorical: p?.includeHistorical }));
   handle(IPC.courseGet, (p) => service.getCourseById(IdSchema.parse(p).id));
@@ -79,10 +95,74 @@ function registerIpc() {
   handle(IPC.search, (p) => { const v=SearchSchema.parse(p); return service.search(v.query,v.area); });
   handle(IPC.settingGet, (p) => service.getSetting(String(p?.key ?? ''))); handle(IPC.settingSet, (p) => { const v=SettingSchema.parse(p); service.setSetting(v.key,v.value); });
   handle(IPC.backup, async () => { const selected=await dialog.showSaveDialog({ title:'Export Command Centre backup',defaultPath:`command-centre-${new Date().toISOString().slice(0,10)}.sqlite`,filters:[{name:'SQLite database',extensions:['sqlite']}] }); if(selected.canceled||!selected.filePath)return null; database.backup(selected.filePath); return selected.filePath; });
+  handle(IPC.exportJson, async () => { const selected=await dialog.showSaveDialog({ title:'Export Command Centre data',defaultPath:`command-centre-export-${new Date().toISOString().slice(0,10)}.json`,filters:[{name:'JSON',extensions:['json']}] }); if(selected.canceled||!selected.filePath)return null; writeFileSync(selected.filePath, JSON.stringify(dataExport.buildJsonExport(), null, 2)); return selected.filePath; });
+  handle(IPC.portals, (p) => portals.list(Boolean(p?.includeArchived)));
+  handle(IPC.portalCreate, (p) => portals.create(PortalInputSchema.parse(p)));
+  handle(IPC.portalUpdate, (p) => portals.update(PortalUpdateSchema.parse(p)));
+  handle(IPC.portalArchive, (p) => portals.archive(IdSchema.parse(p).id));
+  handle(IPC.portalReorder, (p) => portals.reorder(PortalReorderSchema.parse(p).orderedIds));
+  handle(IPC.portalOpen, async (p) => { const portal = portals.list(true).find((entry) => entry.id === PortalOpenSchema.parse(p).id); if(!portal) throw new Error('Portal not found'); if(!portal.url) throw new Error('Add an HTTPS URL in Settings → Portals before opening this portal.'); return portalHost.open(portal.id, portal.name, portal.url, portal.trustedOrigins); });
+  handle(IPC.portalBounds, (p) => { portalHost.setBounds(PortalBoundsSchema.parse(p)); });
+  handle(IPC.portalHide, () => { portalHost.hide(); });
+  handle(IPC.portalBack, () => portalHost.back());
+  handle(IPC.portalForward, () => portalHost.forward());
+  handle(IPC.portalReload, () => portalHost.reload());
+  handle(IPC.portalOpenExternal, () => { portalHost.openExternal(); });
+  handle(IPC.portalState, () => portalHost.state());
+}
+
+function reminderCandidates(): ReminderCandidate[] {
+  const prefs = parseNotificationPreferences({
+    notificationsEnabled: service.getSetting('notificationsEnabled'),
+    notificationLeadMinutes: service.getSetting('notificationLeadMinutes'),
+  });
+  const items = service.getItems().filter((item) => item.status !== 'done' && item.dueAt).map((item) => ({
+    id: `item:${item.id}`,
+    title: item.title,
+    area: item.area,
+    dueAt: item.dueAt!,
+    kind: 'task' as const,
+    leadMinutes: prefs.leadMinutes,
+  }));
+  const assessments = service.getCourses('IITM').concat(service.getCourses('MANIPAL')).flatMap((course) =>
+    course.assessments
+      .filter((assessment) => assessment.scheduledAt)
+      .map((assessment) => ({
+        id: `assessment:${assessment.id}`,
+        title: `${course.code || course.name}: ${assessment.title}`,
+        area: (course.institutionShortName ?? 'IITM') as ReminderCandidate['area'],
+        dueAt: assessment.scheduledAt!,
+        kind: 'assessment' as const,
+        leadMinutes: prefs.leadMinutes,
+      })),
+  );
+  return [...items, ...assessments];
+}
+
+function runReminderTick() {
+  const prefs = parseNotificationPreferences({
+    notificationsEnabled: service.getSetting('notificationsEnabled'),
+    notificationLeadMinutes: service.getSetting('notificationLeadMinutes'),
+  });
+  const due = remindersDueNow(
+    reminderCandidates(),
+    new Date(),
+    prefs,
+    (occurrenceKey) => reminderDeliveries.wasDelivered(occurrenceKey),
+    reminderOccurrenceKey,
+  );
+  for (const reminder of due) {
+    const occurrenceKey = reminderOccurrenceKey(reminder);
+    reminderDeliveries.markDelivered(occurrenceKey);
+    if (Notification.isSupported()) {
+      new Notification({ title: 'Command Centre reminder', body: reminder.title }).show();
+    }
+  }
 }
 
 function createWindow() {
   const win = new BrowserWindow({ width: 1440, height: 920, minWidth: 880, minHeight: 620, titleBarStyle: 'hiddenInset', backgroundColor: '#111113', webPreferences: { preload: path.join(dirname,'../../preload/preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true } });
+  mainWindow = win;
   win.webContents.setWindowOpenHandler(() => ({ action:'deny' }));
   win.webContents.on('will-navigate',(event,url)=>{ if(url!==win.webContents.getURL())event.preventDefault(); });
   win.webContents.on('preload-error',(_event,preloadPath,error)=>console.error('[preload]',preloadPath,error));
@@ -90,6 +170,6 @@ function createWindow() {
   if(process.env.VITE_DEV_SERVER_URL) void win.loadURL(process.env.VITE_DEV_SERVER_URL); else void win.loadFile(path.join(dirname,'../../../dist/index.html'));
 }
 
-app.whenReady().then(() => { app.setAboutPanelOptions({applicationName:'Command Centre',applicationVersion:app.getVersion()});const template:MenuItemConstructorOptions[]=[{label:'Command Centre',submenu:[{role:'about'},{type:'separator'},{role:'services'},{type:'separator'},{role:'hide'},{role:'hideOthers'},{role:'unhide'},{type:'separator'},{role:'quit'}]},{label:'Edit',submenu:[{role:'undo'},{role:'redo'},{type:'separator'},{role:'cut'},{role:'copy'},{role:'paste'},{role:'selectAll'}]},{label:'View',submenu:[{role:'reload'},{role:'toggleDevTools'},{type:'separator'},{role:'resetZoom'},{role:'zoomIn'},{role:'zoomOut'},{type:'separator'},{role:'togglefullscreen'}]},{label:'Window',submenu:[{role:'minimize'},{role:'zoom'},{role:'front'}]}];Menu.setApplicationMenu(Menu.buildFromTemplate(template));const dbPath=process.env.COMMAND_CENTRE_DB ?? path.join(app.getPath('userData'),'command-centre.sqlite'); database=new LocalDatabase(dbPath); runMigrations(database); seedDatabase(database); service=new CommandCentreService(database);academicAdmin=new AcademicAdminService(database);const google=new GoogleProvider(new GoogleOAuthClient((url)=>shell.openExternal(url)));integrations=new IntegrationService(database,new MacKeychainCredentialStore(),new Map([[google.id,google]]),new DeterministicClassifier(),service); registerIpc(); createWindow();setInterval(()=>{for(const account of integrations.getAccounts().filter(a=>a.status==='synced'||a.status==='partial_failure'))void integrations.sync(account.id)},15*60_000).unref(); app.on('activate',()=>{if(BrowserWindow.getAllWindows().length===0)createWindow();}); });
+app.whenReady().then(() => { app.setAboutPanelOptions({applicationName:'Command Centre',applicationVersion:app.getVersion()});const template:MenuItemConstructorOptions[]=[{label:'Command Centre',submenu:[{role:'about'},{type:'separator'},{role:'services'},{type:'separator'},{role:'hide'},{role:'hideOthers'},{role:'unhide'},{type:'separator'},{role:'quit'}]},{label:'Edit',submenu:[{role:'undo'},{role:'redo'},{type:'separator'},{role:'cut'},{role:'copy'},{role:'paste'},{role:'selectAll'}]},{label:'View',submenu:[{role:'reload'},{role:'toggleDevTools'},{type:'separator'},{role:'resetZoom'},{role:'zoomIn'},{role:'zoomOut'},{type:'separator'},{role:'togglefullscreen'}]},{label:'Window',submenu:[{role:'minimize'},{role:'zoom'},{role:'front'}]}];Menu.setApplicationMenu(Menu.buildFromTemplate(template));const dbPath=process.env.COMMAND_CENTRE_DB ?? path.join(app.getPath('userData'),'command-centre.sqlite'); database=new LocalDatabase(dbPath); runMigrations(database); seedDatabase(database); service=new CommandCentreService(database);academicAdmin=new AcademicAdminService(database);portals=new PortalService(database);dataExport=new DataExportService(database);portalHost=new SecurePortalHost(()=>mainWindow);reminderDeliveries=new ReminderDeliveryService(database);const google=new GoogleProvider(new GoogleOAuthClient((url)=>shell.openExternal(url)));integrations=new IntegrationService(database,new MacKeychainCredentialStore(),new Map([[google.id,google]]),new DeterministicClassifier(),service); registerIpc(); createWindow();setInterval(()=>{for(const account of integrations.getAccounts().filter(a=>a.status==='synced'||a.status==='partial_failure'))void integrations.sync(account.id)},15*60_000).unref();setInterval(()=>runReminderTick(),60_000).unref(); app.on('activate',()=>{if(BrowserWindow.getAllWindows().length===0)createWindow();}); });
 app.on('window-all-closed',()=>{ if(process.platform!=='darwin')app.quit(); });
 app.on('before-quit',()=>{ try{database?.close()}catch{/* Database may already be closed during shutdown. */} });

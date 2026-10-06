@@ -121,6 +121,27 @@ const migrations = [
   INSERT OR IGNORE INTO course_match_aliases (id,course_id,alias,created_at)
     SELECT lower(hex(randomblob(16))),id,code,datetime('now') FROM courses WHERE trim(code)!='';
   `,
+  `
+  ALTER TABLE portals ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE portals ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
+  UPDATE portals SET sort_order = CAST(substr(id, 35, 12) AS INTEGER) WHERE sort_order = 0;
+  UPDATE portals SET url='https://ds.study.iitm.ac.in/' WHERE name='IITM Portal' AND (url IS NULL OR trim(url)='');
+  UPDATE portals SET url='https://mail.google.com/' WHERE name='IITM Gmail' AND (url IS NULL OR trim(url)='');
+  UPDATE portals SET url='https://lms.manipal.edu/' WHERE name='Manipal LMS' AND (url IS NULL OR trim(url)='');
+  UPDATE portals SET url='https://outlook.office.com/' WHERE name='Manipal Outlook' AND (url IS NULL OR trim(url)='');
+  UPDATE portals SET url='https://teams.microsoft.com/' WHERE name='Manipal Teams' AND (url IS NULL OR trim(url)='');
+  UPDATE portals SET url='https://chatgpt.com/' WHERE name='ChatGPT' AND (url IS NULL OR trim(url)='');
+  UPDATE portals SET url='https://calendar.google.com/' WHERE name='Exora Tools' AND (url IS NULL OR trim(url)='');
+  INSERT OR IGNORE INTO app_settings VALUES ('notificationsEnabled', 'true', datetime('now'));
+  INSERT OR IGNORE INTO app_settings VALUES ('notificationLeadMinutes', '60', datetime('now'));
+  `,
+  `
+  ALTER TABLE portals ADD COLUMN trusted_origins TEXT NOT NULL DEFAULT '[]';
+  CREATE TABLE IF NOT EXISTS reminder_deliveries (
+    occurrence_key TEXT PRIMARY KEY,
+    delivered_at TEXT NOT NULL
+  );
+  `,
 ];
 
 export function runMigrations(db: LocalDatabase) {

@@ -13,6 +13,10 @@ export class LocalDatabase {
     return options?.simple && row ? Object.values(row)[0] : row;
   }
   transaction<T>(fn: () => T) { return () => { this.inner.exec('BEGIN IMMEDIATE'); try { const result=fn(); this.inner.exec('COMMIT'); return result; } catch(error) { this.inner.exec('ROLLBACK'); throw error; } }; }
-  backup(destination: string) { const escaped=destination.replaceAll("'","''"); this.inner.exec(`VACUUM INTO '${escaped}'`); }
+  backup(destination: string) {
+    try { this.inner.exec('PRAGMA wal_checkpoint(TRUNCATE)'); } catch { /* WAL may be unavailable in some test environments. */ }
+    const escaped = destination.replaceAll("'", "''");
+    this.inner.exec(`VACUUM INTO '${escaped}'`);
+  }
   close() { this.inner.close(); }
 }
