@@ -1,0 +1,17 @@
+import type { ProviderRecord } from '../integrations/types.js';
+import { consolidateClassificationProposals } from './proposal-utils.js';
+
+export interface CourseReference { id:string; institutionId:string; code:string; name:string; aliases:string[] }
+export interface ClassificationProposal { kind:'item'|'assessment'|'deadline'|'activity'|'class-session'|'new-course'|'review';confidence:number;title:string;courseId?:string;institutionId?:string;proposedDueAt?:string;proposedData:Record<string,unknown>;reasons:string[] }
+
+const escape=(value:string)=>value.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+function explicitDate(text:string):string|undefined {
+  const iso=text.match(/\b(20\d{2})[-/]([01]?\d)[-/]([0-3]?\d)(?:[ T](\d{1,2}):(\d{2}))?/);if(iso){const date=new Date(`${iso[1]}-${iso[2].padStart(2,'0')}-${iso[3].padStart(2,'0')}T${(iso[4]??'23').padStart(2,'0')}:${iso[5]??'59'}:00`);if(!Number.isNaN(date.getTime()))return date.toISOString()}
+  const named=text.match(/\b([0-3]?\d)\s+(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(20\d{2})(?:\s+(\d{1,2}):(\d{2}))?/i);if(named){const date=new Date(`${named[2]} ${named[1]}, ${named[3]} ${named[4]??'23'}:${named[5]??'59'}`);if(!Number.isNaN(date.getTime()))return date.toISOString()}return undefined;
+}
+export class DeterministicClassifier {
+  classify(record:ProviderRecord,courses:CourseReference[],institutionId?:string,options:{academicSource?:boolean}={}):ClassificationProposal[] {if(!options.academicSource||!institutionId)return[];const text=`${record.title}\n${record.snippet??''}\n${record.content??''}`;const lower=text.toLowerCase();const course=courses.find(c=>[c.code,c.name,...c.aliases].some(term=>term&&new RegExp(`\\b${escape(term.toLowerCase())}\\b`,'i').test(lower)));const due=/(deadline|due|submit|submission)/i.test(text)?explicitDate(text):undefined;let kind:ClassificationProposal['kind']='review';let confidence=.25;if(/end\s*term|\bquiz\b|\bexam\b/i.test(text)){kind='assessment';confidence=.78}else if(/extra activity|peer review/i.test(text)){kind='activity';confidence=.76}else if(/assignment/i.test(text)){kind=due?'deadline':'item';confidence=due?.86:.68}else if(/live session|\bclass\b/i.test(text)){kind='class-session';confidence=.72}else if(due){kind='deadline';confidence=.7}
+    const proposals:ClassificationProposal[]=[{kind,confidence:course?Math.min(.98,confidence+.1):confidence,title:record.title,courseId:course?.id,institutionId:course?.institutionId??institutionId,proposedDueAt:due,proposedData:{itemType:kind==='assessment'?'exam':kind==='activity'?'activity':kind==='class-session'?'class':kind==='deadline'?'assignment':'task'},reasons:[course?`Matched database course ${course.code||course.name}`:'No known course match',due?'Found an explicit full date':'No unambiguous full due date']}];
+    const code=text.match(/\b([A-Z]{2,8}\s?-?\d{3,6})\b/);const strongAcademicContext=/\b(course|week|module|lecture|assignment|quiz|exam|end\s*term|extra activity|peer review|class)\b/i.test(text);if(code&&!course&&strongAcademicContext)proposals.push({kind:'new-course',confidence:.7,title:`New course ${code[1].replaceAll(' ','')}`,institutionId,proposedData:{code:code[1].replaceAll(' ','')},reasons:['Academic source route and academic context contain an unknown course-like code']});return consolidateClassificationProposals(proposals);
+  }
+}
