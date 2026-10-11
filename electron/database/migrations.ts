@@ -96,7 +96,6 @@ const migrations = [
     created_at TEXT NOT NULL,
     UNIQUE(course_id, alias)
   );
-  PRAGMA foreign_keys=OFF;
   CREATE TABLE terms_v2 (
     id TEXT PRIMARY KEY,
     program_id TEXT NOT NULL REFERENCES programs(id),
@@ -117,7 +116,6 @@ const migrations = [
     FROM terms t JOIN programs p ON p.id=t.program_id;
   DROP TABLE terms;
   ALTER TABLE terms_v2 RENAME TO terms;
-  PRAGMA foreign_keys=ON;
   INSERT OR IGNORE INTO course_match_aliases (id,course_id,alias,created_at)
     SELECT lower(hex(randomblob(16))),id,code,datetime('now') FROM courses WHERE trim(code)!='';
   `,
@@ -144,14 +142,37 @@ const migrations = [
   `,
 ];
 
-export function runMigrations(db: LocalDatabase) {
+export const MIGRATION_COUNT = migrations.length;
+
+/** Terms rebuild drops a table referenced by courses; FK must be disabled before BEGIN. */
+function migrationNeedsForeignKeysDisabled(sql: string) {
+  return /DROP TABLE terms\b/i.test(sql);
+}
+
+function applyMigration(db: LocalDatabase, sql: string, nextVersion: number) {
+  const disableForeignKeys = migrationNeedsForeignKeysDisabled(sql);
+  if (disableForeignKeys) db.exec('PRAGMA foreign_keys=OFF');
+  try {
+    db.transaction(() => {
+      db.exec(sql);
+      db.pragma(`user_version = ${nextVersion}`);
+    })();
+  } finally {
+    if (disableForeignKeys) db.exec('PRAGMA foreign_keys=ON');
+  }
+}
+
+/** Applies migrations until the database reaches `targetVersion` (exclusive upper bound by count). */
+export function runMigrationsToVersion(db: LocalDatabase, targetVersion: number) {
+  if (targetVersion < 0 || targetVersion > MIGRATION_COUNT) throw new Error(`Invalid migration target: ${targetVersion}`);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   const current = db.pragma('user_version', { simple: true }) as number;
-  migrations.slice(current).forEach((sql, index) => {
-    db.transaction(() => {
-      db.exec(sql);
-      db.pragma(`user_version = ${current + index + 1}`);
-    })();
+  migrations.slice(current, targetVersion).forEach((sql, index) => {
+    applyMigration(db, sql, current + index + 1);
   });
+}
+
+export function runMigrations(db: LocalDatabase) {
+  runMigrationsToVersion(db, MIGRATION_COUNT);
 }

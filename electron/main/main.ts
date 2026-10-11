@@ -15,6 +15,7 @@ import { GoogleProvider } from '../integrations/google/google-provider.js';
 import { DeterministicClassifier } from '../classification/classifier.js';
 import { configureAppUserData } from './app-paths.js';
 import { loadMainEnvironment } from './load-env.js';
+import { logStartupError, resolveDatabasePath } from './startup-log.js';
 import { DataExportService } from '../services/data-export-service.js';
 import { PortalService } from '../services/portal-service.js';
 import { SecurePortalHost } from '../portals/secure-portal-host.js';
@@ -22,7 +23,7 @@ import { parseNotificationPreferences, remindersDueNow, type ReminderCandidate }
 import { ReminderDeliveryService, reminderOccurrenceKey } from '../services/reminder-delivery-service.js';
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
-configureAppUserData();
+const userDataPath = configureAppUserData();
 loadMainEnvironment({
   mainModuleDir: dirname,
   isPackaged: app.isPackaged,
@@ -161,15 +162,96 @@ function runReminderTick() {
 }
 
 function createWindow() {
-  const win = new BrowserWindow({ width: 1440, height: 920, minWidth: 880, minHeight: 620, titleBarStyle: 'hiddenInset', backgroundColor: '#111113', webPreferences: { preload: path.join(dirname,'../../preload/preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true } });
+  const win = new BrowserWindow({
+    width: 1440,
+    height: 920,
+    minWidth: 880,
+    minHeight: 620,
+    show: false,
+    titleBarStyle: 'hiddenInset',
+    backgroundColor: '#111113',
+    webPreferences: { preload: path.join(dirname, '../../preload/preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true },
+  });
   mainWindow = win;
-  win.webContents.setWindowOpenHandler(() => ({ action:'deny' }));
-  win.webContents.on('will-navigate',(event,url)=>{ if(url!==win.webContents.getURL())event.preventDefault(); });
-  win.webContents.on('preload-error',(_event,preloadPath,error)=>console.error('[preload]',preloadPath,error));
-  win.webContents.on('did-fail-load',(_event,code,description,url)=>console.error('[load]',code,description,url));
-  if(process.env.VITE_DEV_SERVER_URL) void win.loadURL(process.env.VITE_DEV_SERVER_URL); else void win.loadFile(path.join(dirname,'../../../dist/index.html'));
+  win.once('ready-to-show', () => {
+    if (!win.isDestroyed()) {
+      win.show();
+      win.focus();
+    }
+  });
+  win.on('closed', () => {
+    if (mainWindow === win) mainWindow = null;
+  });
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  win.webContents.on('will-navigate', (event, url) => { if (url !== win.webContents.getURL()) event.preventDefault(); });
+  win.webContents.on('preload-error', (_event, preloadPath, error) => console.error('[preload]', preloadPath, error));
+  win.webContents.on('did-fail-load', (_event, code, description, url) => console.error('[load]', code, description, url));
+  if (process.env.VITE_DEV_SERVER_URL) void win.loadURL(process.env.VITE_DEV_SERVER_URL);
+  else void win.loadFile(path.join(dirname, '../../../dist/index.html'));
+  return win;
 }
 
-app.whenReady().then(() => { app.setAboutPanelOptions({applicationName:'Command Centre',applicationVersion:app.getVersion()});const template:MenuItemConstructorOptions[]=[{label:'Command Centre',submenu:[{role:'about'},{type:'separator'},{role:'services'},{type:'separator'},{role:'hide'},{role:'hideOthers'},{role:'unhide'},{type:'separator'},{role:'quit'}]},{label:'Edit',submenu:[{role:'undo'},{role:'redo'},{type:'separator'},{role:'cut'},{role:'copy'},{role:'paste'},{role:'selectAll'}]},{label:'View',submenu:[{role:'reload'},{role:'toggleDevTools'},{type:'separator'},{role:'resetZoom'},{role:'zoomIn'},{role:'zoomOut'},{type:'separator'},{role:'togglefullscreen'}]},{label:'Window',submenu:[{role:'minimize'},{role:'zoom'},{role:'front'}]}];Menu.setApplicationMenu(Menu.buildFromTemplate(template));const dbPath=process.env.COMMAND_CENTRE_DB ?? path.join(app.getPath('userData'),'command-centre.sqlite'); database=new LocalDatabase(dbPath); runMigrations(database); seedDatabase(database); service=new CommandCentreService(database);academicAdmin=new AcademicAdminService(database);portals=new PortalService(database);dataExport=new DataExportService(database);portalHost=new SecurePortalHost(()=>mainWindow);reminderDeliveries=new ReminderDeliveryService(database);const google=new GoogleProvider(new GoogleOAuthClient((url)=>shell.openExternal(url)));integrations=new IntegrationService(database,new MacKeychainCredentialStore(),new Map([[google.id,google]]),new DeterministicClassifier(),service); registerIpc(); createWindow();setInterval(()=>{for(const account of integrations.getAccounts().filter(a=>a.status==='synced'||a.status==='partial_failure'))void integrations.sync(account.id)},15*60_000).unref();setInterval(()=>runReminderTick(),60_000).unref(); app.on('activate',()=>{if(BrowserWindow.getAllWindows().length===0)createWindow();}); });
+function buildApplicationMenu() {
+  const template: MenuItemConstructorOptions[] = [
+    { label: 'Command Centre', submenu: [{ role: 'about' }, { type: 'separator' }, { role: 'services' }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' }] },
+    { label: 'Edit', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] },
+    { label: 'View', submenu: [{ role: 'reload' }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { type: 'separator' }, { role: 'togglefullscreen' }] },
+    { label: 'Window', submenu: [{ role: 'minimize' }, { role: 'zoom' }, { role: 'front' }] },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+function initializeServices() {
+  const dbPath = resolveDatabasePath();
+  console.info('[startup] Opening database at', dbPath);
+  database = new LocalDatabase(dbPath);
+  runMigrations(database);
+  seedDatabase(database);
+  service = new CommandCentreService(database);
+  academicAdmin = new AcademicAdminService(database);
+  portals = new PortalService(database);
+  dataExport = new DataExportService(database);
+  portalHost = new SecurePortalHost(() => mainWindow);
+  reminderDeliveries = new ReminderDeliveryService(database);
+  const google = new GoogleProvider(new GoogleOAuthClient((url) => shell.openExternal(url)));
+  integrations = new IntegrationService(database, new MacKeychainCredentialStore(), new Map([[google.id, google]]), new DeterministicClassifier(), service);
+  registerIpc();
+}
+
+function startBackgroundTasks() {
+  setInterval(() => {
+    for (const account of integrations.getAccounts().filter((a) => a.status === 'synced' || a.status === 'partial_failure')) void integrations.sync(account.id);
+  }, 15 * 60_000).unref();
+  setInterval(() => runReminderTick(), 60_000).unref();
+}
+
+function bootstrapApplication() {
+  app.setAboutPanelOptions({ applicationName: 'Command Centre', applicationVersion: app.getVersion() });
+  buildApplicationMenu();
+  initializeServices();
+  createWindow();
+  startBackgroundTasks();
+}
+
+app.whenReady().then(() => {
+  try {
+    bootstrapApplication();
+  } catch (error) {
+    logStartupError(error, userDataPath);
+    app.exit(1);
+  }
+});
+
+app.on('activate', () => {
+  if (BrowserWindow.getAllWindows().length === 0) {
+    try {
+      if (!database) initializeServices();
+      createWindow();
+    } catch (error) {
+      logStartupError(error, userDataPath);
+      app.exit(1);
+    }
+  }
+});
 app.on('window-all-closed',()=>{ if(process.platform!=='darwin')app.quit(); });
 app.on('before-quit',()=>{ try{database?.close()}catch{/* Database may already be closed during shutdown. */} });
